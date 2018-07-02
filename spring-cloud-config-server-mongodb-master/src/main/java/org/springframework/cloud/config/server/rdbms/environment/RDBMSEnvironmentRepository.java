@@ -1,10 +1,10 @@
 package org.springframework.cloud.config.server.rdbms.environment;
 
-import java.sql.ResultSet;
-import java.sql.SQLException;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.HashMap;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -14,11 +14,16 @@ import org.springframework.beans.factory.config.YamlProcessor;
 import org.springframework.cloud.config.environment.Environment;
 import org.springframework.cloud.config.environment.PropertySource;
 import org.springframework.cloud.config.server.environment.EnvironmentRepository;
-import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.core.ResultSetExtractor;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.util.StringUtils;
+
+import com.fasterxml.jackson.core.JsonParseException;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.JsonMappingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
 
 public class RDBMSEnvironmentRepository implements EnvironmentRepository {
 
@@ -29,11 +34,11 @@ public class RDBMSEnvironmentRepository implements EnvironmentRepository {
 	private static final String DEFAULT_LABEL = null;
 
 	private JdbcTemplate jdbcTemplate;
-	//private MapFlattener mapFlattener;
+	private MapFlattener mapFlattener;
 
 	public RDBMSEnvironmentRepository(JdbcTemplate jdbcTemplate) {
 		this.jdbcTemplate = jdbcTemplate;
-		//this.mapFlattener = new MapFlattener();
+		this.mapFlattener = new MapFlattener();
 	}
 
 	@Override
@@ -58,50 +63,36 @@ public class RDBMSEnvironmentRepository implements EnvironmentRepository {
 		parameters.addValue(PROFILE, profiles);
 		parameters.addValue(LABEL, labels);
 		
-		System.out.println("Labels: " + labels);
-		System.out.println("Profiles: " + profiles);
+		String csProfiles = String.join("', '", profiles);
 		
-		Environment environment = jdbcTemplate.query("SELECT label, profile, source FROM gateway WHERE profile IN ('prod') AND label IN ('master') ORDER BY label ASC, profile ASC;",
-				
-				new ResultSetExtractor<Environment>() {
-
-					Environment environment = new Environment(name, profilesArr, label, null, null);
-					
-					@Override
-					public Environment extractData(ResultSet rs) throws SQLException, DataAccessException {
+		Environment environment = null;
+		try {
+			
+			List<SimplePropertySource> sources = jdbcTemplate.query("SELECT label, profile, source FROM gateway WHERE profile IN ('"+ name +"') AND label IN ('"+ csProfiles +"') ORDER BY label ASC, profile ASC;",
+					(rs, index) -> {
 						
-						while(rs.next()){
-							
-							String lbl = rs.getString("label");
-							String src = rs.getString("source");
-							String profile = rs.getString("source");
-							
-							System.out.println("Label: " + lbl);
-							System.out.println("Profile: " + profile);
-							System.out.println("Source: " + src);
-							
-							Map map = new HashMap<>();
-							map.put("src", src);
-							PropertySource propSource = new PropertySource(rs.getString("label"), map);
-							environment.add(propSource);
+						String lbl = rs.getString("label");
+						String src = rs.getString("source");
+						String prof = rs.getString("profile");
 						
-						}
+						SimplePropertySource source = new SimplePropertySource();
+						source.setLabel(label);
+						source.setProfile(prof);
 						
-						return environment;
+						try {
+							source.setSource(convertToMap(src));
+						} catch (Exception e) {e.printStackTrace();}
+						
+						return source;
 					}
-		});
-				
-		/*Query query = new Query();
-		query.addCriteria(Criteria.where(PROFILE).in(profiles.toArray()));
-		query.addCriteria(Criteria.where(LABEL).in(labels.toArray()));*/
-
-//		Environment environment = null;
-		/*try {
-			List<MongoPropertySource> sources = restTemplate.find(query, MongoPropertySource.class, name);
+			);
+			
 			sortSourcesByLabel(sources, labels);
 			sortSourcesByProfile(sources, profiles);
+			
 			environment = new Environment(name, profilesArr, label, null, null);
-			for (MongoPropertySource propertySource : sources) {
+			
+			for (SimplePropertySource propertySource : sources) {
 				String sourceName = generateSourceName(name, propertySource);
 				Map<String, Object> flatSource = mapFlattener.flatten(propertySource.getSource());
 				PropertySource propSource = new PropertySource(sourceName, flatSource);
@@ -110,7 +101,7 @@ public class RDBMSEnvironmentRepository implements EnvironmentRepository {
 		}
 		catch (Exception e) {
 			throw new IllegalStateException("Cannot load environment", e);
-		}*/
+		}
 
 		return environment;
 	}
@@ -119,11 +110,20 @@ public class RDBMSEnvironmentRepository implements EnvironmentRepository {
 		return new ArrayList<String>(new LinkedHashSet<String>(values));
 	}
 
-	/*private void sortSourcesByLabel(List<MongoPropertySource> sources, final List<String> labels) {
-		Collections.sort(sources, new Comparator<MongoPropertySource>() {
+	private LinkedHashMap<String, Object> convertToMap(String jsonString) throws JsonParseException, JsonMappingException, IOException{
+		ObjectMapper mapperObj = new ObjectMapper();
+		mapperObj.enable(DeserializationFeature.ACCEPT_EMPTY_STRING_AS_NULL_OBJECT);
+		mapperObj.configure(DeserializationFeature.FAIL_ON_MISSING_CREATOR_PROPERTIES, false)
+		 		 .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+		return mapperObj.readValue(jsonString, new TypeReference<LinkedHashMap<String, Object>>(){});
+		
+	}
+	
+	private void sortSourcesByLabel(List<SimplePropertySource> sources, final List<String> labels) {
+		Collections.sort(sources, new Comparator<SimplePropertySource>() {
 
 			@Override
-			public int compare(MongoPropertySource s1, MongoPropertySource s2) {
+			public int compare(SimplePropertySource s1, SimplePropertySource s2) {
 				int i1 = labels.indexOf(s1.getLabel());
 				int i2 = labels.indexOf(s2.getLabel());
 				return Integer.compare(i1, i2);
@@ -132,11 +132,11 @@ public class RDBMSEnvironmentRepository implements EnvironmentRepository {
 		});
 	}
 
-	private void sortSourcesByProfile(List<MongoPropertySource> sources, final List<String> profiles) {
-		Collections.sort(sources, new Comparator<MongoPropertySource>() {
+	private void sortSourcesByProfile(List<SimplePropertySource> sources, final List<String> profiles) {
+		Collections.sort(sources, new Comparator<SimplePropertySource>() {
 
 			@Override
-			public int compare(MongoPropertySource s1, MongoPropertySource s2) {
+			public int compare(SimplePropertySource s1, SimplePropertySource s2) {
 				int i1 = profiles.indexOf(s1.getProfile());
 				int i2 = profiles.indexOf(s2.getProfile());
 				return Integer.compare(i1, i2);
@@ -145,7 +145,7 @@ public class RDBMSEnvironmentRepository implements EnvironmentRepository {
 		});
 	}
 
-	private String generateSourceName(String environmentName, MongoPropertySource source) {
+	private String generateSourceName(String environmentName, SimplePropertySource source) {
 		String sourceName;
 		String profile = source.getProfile() != null ? source.getProfile() : DEFAULT;
 		String label = source.getLabel();
@@ -155,9 +155,9 @@ public class RDBMSEnvironmentRepository implements EnvironmentRepository {
 			sourceName = String.format("%s-%s", environmentName, profile);
 		}
 		return sourceName;
-	}*/
+	}
 
-	public static class MongoPropertySource {
+	public static class SimplePropertySource {
 
 		private String profile;
 		private String label;
@@ -186,7 +186,6 @@ public class RDBMSEnvironmentRepository implements EnvironmentRepository {
 		public void setSource(LinkedHashMap<String, Object> source) {
 			this.source = source;
 		}
-
 	}
 
 	private static class MapFlattener extends YamlProcessor {
@@ -194,7 +193,6 @@ public class RDBMSEnvironmentRepository implements EnvironmentRepository {
 		public Map<String, Object> flatten(Map<String, Object> source) {
 			return getFlattenedMap(source);
 		}
-
 	}
 
 }
